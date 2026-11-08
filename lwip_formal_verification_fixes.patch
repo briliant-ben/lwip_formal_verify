@@ -1,0 +1,965 @@
+diff --git a/src/apps/http/http_client.c b/src/apps/http/http_client.c
+index 32c6f6c2..1c632f74 100644
+--- a/src/apps/http/http_client.c
++++ b/src/apps/http/http_client.c
+@@ -211,7 +211,7 @@ http_parse_response_status(struct pbuf *p, u16_t *http_version, u16_t *http_stat
+     /* get parts of first line */
+     u16_t space1, space2;
+     space1 = pbuf_memfind(p, " ", 1, 0);
+-    if (space1 != 0xFFFF) {
++    if ((space1 != 0xFFFF) && (space1 < end1)) {
+       if ((pbuf_memcmp(p, 0, "HTTP/", 5) == 0)  && (pbuf_get_at(p, 6) == '.')) {
+         char status_num[10];
+         size_t status_num_len;
+@@ -223,7 +223,7 @@ http_parse_response_status(struct pbuf *p, u16_t *http_version, u16_t *http_stat
+ 
+         /* parse http status number */
+         space2 = pbuf_memfind(p, " ", 1, space1 + 1);
+-        if (space2 != 0xFFFF) {
++        if ((space2 != 0xFFFF) && (space2 < end1)) {
+           *http_status_str_offset = space2 + 1;
+           status_num_len = space2 - space1 - 1;
+         } else {
+@@ -259,9 +259,9 @@ http_wait_headers(struct pbuf *p, u32_t *content_length, u16_t *total_header_len
+     *total_header_len = end1 + 4;
+ 
+     content_len_hdr = pbuf_memfind(p, "Content-Length: ", 16, 0);
+-    if (content_len_hdr != 0xFFFF) {
++    if ((content_len_hdr != 0xFFFF) && (content_len_hdr < end1)) {
+       u16_t content_len_line_end = pbuf_memfind(p, "\r\n", 2, content_len_hdr);
+-      if (content_len_line_end != 0xFFFF) {
++      if ((content_len_line_end != 0xFFFF) && (content_len_line_end <= (u16_t)(end1 + 2))) {
+         char content_len_num[16];
+         u16_t content_len_num_len = (u16_t)(content_len_line_end - content_len_hdr - 16);
+         if (content_len_num_len < sizeof(content_len_num)) {
+@@ -307,6 +307,10 @@ httpc_tcp_recv(void *arg, struct altcp_pcb *pcb, struct pbuf *p, err_t r)
+     if (req->rx_hdrs == NULL) {
+       req->rx_hdrs = p;
+     } else {
++      if (((u32_t)req->rx_hdrs->tot_len + (u32_t)p->tot_len) > 0xFFFFU) {
++        pbuf_free(p);
++        return httpc_close(req, HTTPC_RESULT_ERR_MEM, 0, ERR_MEM);
++      }
+       pbuf_cat(req->rx_hdrs, p);
+     }
+     if (req->parse_state == HTTPC_PARSE_WAIT_FIRST_LINE) {
+diff --git a/src/apps/mdns/mdns_domain.c b/src/apps/mdns/mdns_domain.c
+index 265b5e6a..29f37424 100644
+--- a/src/apps/mdns/mdns_domain.c
++++ b/src/apps/mdns/mdns_domain.c
+@@ -206,8 +206,8 @@ mdns_readname_loop(struct pbuf *p, u16_t offset, struct mdns_domain *domain, uns
+   u8_t c;
+ 
+   do {
+-    if (depth > 5) {
+-      /* Too many jumps */
++    if ((depth > 5) || (offset >= p->tot_len) || (offset == 0xFFFF)) {
++      /* Too many jumps or offset out of packet bounds */
+       return MDNS_READNAME_ERROR;
+     }
+ 
+@@ -241,7 +241,7 @@ mdns_readname_loop(struct pbuf *p, u16_t offset, struct mdns_domain *domain, uns
+     if (c <= MDNS_LABEL_MAXLEN) {
+       err_t res;
+ 
+-      if (c + domain->length >= MDNS_DOMAIN_MAXLEN) {
++      if ((c + domain->length >= MDNS_DOMAIN_MAXLEN) || ((u32_t)offset + (u32_t)c > (u32_t)p->tot_len)) {
+         return MDNS_READNAME_ERROR;
+       }
+       res = mdns_domain_add_label_pbuf(domain, p, offset, c);
+diff --git a/src/apps/mqtt/mqtt.c b/src/apps/mqtt/mqtt.c
+index b22fd440..0d9a55ce 100644
+--- a/src/apps/mqtt/mqtt.c
++++ b/src/apps/mqtt/mqtt.c
+@@ -737,6 +737,13 @@ mqtt_message_received(mqtt_client_t *client, u8_t fixed_hdr_len, u16_t length, u
+         LWIP_DEBUGF(MQTT_DEBUG_WARN, ("mqtt_message_received: Receive buffer can not fit topic + pkt_id\n"));
+         goto out_disconnect;
+       }
++      if ((after_topic == length) && (var_hdr_payload != (client->rx_buffer + fixed_hdr_len))) {
++        /* pbuf_get_contiguous returned zero-copy pointer into p->payload of size 'length';
++         * move into client->rx_buffer so topic[topic_len] = 0 does not write 1B OOB past p->payload */
++        MEMCPY(client->rx_buffer + fixed_hdr_len, var_hdr_payload, length);
++        var_hdr_payload = client->rx_buffer + fixed_hdr_len;
++        topic = var_hdr_payload + 2;
++      }
+ 
+       /* id for QoS 1 and 2 */
+       if (qos > 0) {
+diff --git a/src/apps/netbiosns/netbiosns.c b/src/apps/netbiosns/netbiosns.c
+index 7df4e75c..67b2ee39 100644
+--- a/src/apps/netbiosns/netbiosns.c
++++ b/src/apps/netbiosns/netbiosns.c
+@@ -270,6 +270,9 @@ netbiosns_name_decode(const char *name_enc, size_t name_enc_len, char *name_dec,
+     cnbname = cname << 4;
+     pname++;
+ 
++    if (pname >= pend) {
++      return -1;
++    }
+     cname = *pname;
+     if (!lwip_isupper(cname)) {
+       /* Not legal. */
+@@ -286,6 +289,9 @@ netbiosns_name_decode(const char *name_enc, size_t name_enc_len, char *name_dec,
+     }
+   }
+ 
++  if (idx <= NETBIOS_NAME_LEN) {
++    name_dec[idx] = '\0';
++  }
+   return 0;
+ }
+ 
+@@ -369,7 +375,10 @@ netbiosns_recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t
+           ((netbios_hdr->flags & PP_NTOHS(NETB_HFLAG_RESPONSE)) == 0) &&
+           (netbios_hdr->questions == PP_NTOHS(1))) {
+         /* decode the NetBIOS name */
+-        netbiosns_name_decode((char *)(netbios_question_hdr->encname), sizeof(netbios_question_hdr->encname), netbios_name, sizeof(netbios_name));
++        if (netbiosns_name_decode((char *)(netbios_question_hdr->encname), sizeof(netbios_question_hdr->encname), netbios_name, sizeof(netbios_name)) != 0) {
++          pbuf_free(p);
++          return;
++        }
+         /* check the request type */
+         if (netbios_question_hdr->type == PP_HTONS(NETB_QTYPE_NB)) {
+           /* if the packet is for us */
+diff --git a/src/apps/snmp/snmp_msg.c b/src/apps/snmp/snmp_msg.c
+index 156b36e3..36d8e039 100644
+--- a/src/apps/snmp/snmp_msg.c
++++ b/src/apps/snmp/snmp_msg.c
+@@ -1277,7 +1277,7 @@ snmp_parse_inbound_frame(struct snmp_request *request)
+     }
+   } else {
+     IF_PARSE_EXEC(snmp_asn1_dec_s32t(&pbuf_stream, tlv.value_len, &request->error_index));
+-    IF_PARSE_ASSERT(s32_value == 0);
++    IF_PARSE_ASSERT(request->error_index == 0);
+   }
+ 
+   /* decode varbind-list type (next container level) */
+diff --git a/src/apps/tftp/tftp.c b/src/apps/tftp/tftp.c
+index 122b8c79..a90b8f14 100644
+--- a/src/apps/tftp/tftp.c
++++ b/src/apps/tftp/tftp.c
+@@ -266,6 +266,11 @@ tftp_recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr
+     return;
+   }
+ 
++  if (p->len < 2) {
++    pbuf_free(p);
++    return;
++  }
++
+   opcode = sbuf[0];
+ 
+   tftp_state.last_pkt = tftp_state.timer;
+@@ -350,6 +355,11 @@ tftp_recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr
+         break;
+       }
+ 
++      if (p->len < TFTP_HEADER_LENGTH) {
++        send_error(addr, port, TFTP_ERROR_ILLEGAL_OPERATION, "Short DATA packet");
++        break;
++      }
++
+       blknum = lwip_ntohs(sbuf[1]);
+       if (blknum == tftp_state.blknum) {
+         pbuf_remove_header(p, TFTP_HEADER_LENGTH);
+@@ -390,6 +400,11 @@ tftp_recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr
+         break;
+       }
+ 
++      if (p->len < TFTP_HEADER_LENGTH) {
++        send_error(addr, port, TFTP_ERROR_ILLEGAL_OPERATION, "Short ACK packet");
++        break;
++      }
++
+       blknum = lwip_ntohs(sbuf[1]);
+       if (blknum != tftp_state.blknum) {
+         send_error(addr, port, TFTP_ERROR_UNKNOWN_TRFR_ID, "Wrong block number");
+@@ -412,9 +427,10 @@ tftp_recv(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr
+       break;
+     }
+     case PP_HTONS(TFTP_ERROR):
+-      if (tftp_state.handle != NULL) {
++      if ((tftp_state.handle != NULL) && (p->len >= TFTP_HEADER_LENGTH)) {
++        u16_t errcode = lwip_ntohs(sbuf[1]);
+         pbuf_remove_header(p, TFTP_HEADER_LENGTH);
+-        tftp_state.ctx->error(tftp_state.handle, sbuf[1], (const char*)p->payload, p->len);
++        tftp_state.ctx->error(tftp_state.handle, errcode, (const char*)p->payload, p->len);
+         close_handle();
+       }
+       break;
+diff --git a/src/core/dns.c b/src/core/dns.c
+index 6540f143..1b4d13de 100644
+--- a/src/core/dns.c
++++ b/src/core/dns.c
+@@ -680,8 +680,8 @@ dns_compare_name(const char *query, struct pbuf *p, u16_t start_offset)
+     }
+     response_offset++;
+     /** @see RFC 1035 - 4.1.4. Message compression */
+-    if ((n & 0xc0) == 0xc0) {
+-      /* Compressed name: cannot be equal since we don't send them */
++    if ((n & 0xc0) != 0) {
++      /* Compressed or extended label: cannot be equal since we don't send them */
+       return 0xFFFF;
+     } else {
+       /* Not compressed name */
+@@ -690,7 +690,8 @@ dns_compare_name(const char *query, struct pbuf *p, u16_t start_offset)
+         if (c < 0) {
+           return 0xFFFF;
+         }
+-        if (lwip_tolower((*query)) != lwip_tolower((u8_t)c)) {
++        if ((*query == '\0') || (*query == '.') ||
++            (lwip_tolower((*query)) != lwip_tolower((u8_t)c))) {
+           return 0xFFFF;
+         }
+         if (response_offset == 0xFFFF) {
+@@ -701,12 +702,21 @@ dns_compare_name(const char *query, struct pbuf *p, u16_t start_offset)
+         ++query;
+         --n;
+       }
+-      ++query;
+     }
+     n = pbuf_try_get_at(p, response_offset);
+     if (n < 0) {
+       return 0xFFFF;
+     }
++    if (n != 0) {
++      if (*query != '.') {
++        return 0xFFFF;
++      }
++      ++query;
++    } else {
++      if (*query != '\0') {
++        return 0xFFFF;
++      }
++    }
+   } while (n != 0);
+ 
+   if (response_offset == 0xFFFF) {
+diff --git a/src/core/ipv4/dhcp.c b/src/core/ipv4/dhcp.c
+index d9ec90da..63fbedbb 100644
+--- a/src/core/ipv4/dhcp.c
++++ b/src/core/ipv4/dhcp.c
+@@ -1572,11 +1572,23 @@ again:
+       /* overflow */
+       return ERR_BUF;
+     }
+-    /* len byte might be in the next pbuf */
+-    if ((offset + 1) < q->len) {
+-      len = options[offset + 1];
++    if (op != DHCP_OPTION_PAD) {
++      if ((offset + 1) >= offset_max) {
++        /* option length byte falls outside current option region (e.g. sname/file boundary) */
++        return ERR_VAL;
++      }
++      /* len byte might be in the next pbuf */
++      if ((offset + 1) < q->len) {
++        len = options[offset + 1];
++      } else {
++        len = (q->next != NULL ? ((u8_t *)q->next->payload)[0] : 0);
++      }
++      if (((u32_t)val_offset + (u32_t)len) > (u32_t)offset_max) {
++        /* option value extends beyond current option region */
++        return ERR_VAL;
++      }
+     } else {
+-      len = (q->next != NULL ? ((u8_t *)q->next->payload)[0] : 0);
++      len = 0;
+     }
+     /* LWIP_DEBUGF(DHCP_DEBUG, ("msg_offset=%"U16_F", q->len=%"U16_F"\n", msg_offset, q->len)); */
+     decode_len = len;
+diff --git a/src/core/ipv4/etharp.c b/src/core/ipv4/etharp.c
+index 5f63b543..407baf87 100644
+--- a/src/core/ipv4/etharp.c
++++ b/src/core/ipv4/etharp.c
+@@ -650,6 +650,16 @@ etharp_input(struct pbuf *p, struct netif *netif)
+ 
+   LWIP_ERROR("netif != NULL", (netif != NULL), return;);
+ 
++  if (p->len < SIZEOF_ETHARP_HDR) {
++    LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_LEVEL_WARNING,
++                ("etharp_input: packet dropped, too short (%"U16_F"/%"U16_F")\n",
++                 p->len, (u16_t)SIZEOF_ETHARP_HDR));
++    ETHARP_STATS_INC(etharp.lenerr);
++    ETHARP_STATS_INC(etharp.drop);
++    pbuf_free(p);
++    return;
++  }
++
+   hdr = (struct etharp_hdr *)p->payload;
+ 
+   /* RFC 826 "Packet Reception": */
+diff --git a/src/core/ipv4/icmp.c b/src/core/ipv4/icmp.c
+index f35ff4b5..0e4b7351 100644
+--- a/src/core/ipv4/icmp.c
++++ b/src/core/ipv4/icmp.c
+@@ -350,6 +350,11 @@ icmp_send_response(struct pbuf *p, u8_t type, u8_t code)
+   /* increase number of messages attempted to send */
+   MIB2_STATS_INC(mib2.icmpoutmsgs);
+ 
++  if (p->len < IP_HLEN) {
++    MIB2_STATS_INC(mib2.icmpouterrors);
++    return;
++  }
++
+   /* Keep IP header + up to 8 bytes */
+   response_pkt_len = IP_HLEN + ICMP_DEST_UNREACH_DATASIZE;
+   if (p->tot_len < response_pkt_len) {
+diff --git a/src/core/ipv4/igmp.c b/src/core/ipv4/igmp.c
+index a74df16f..168569d2 100644
+--- a/src/core/ipv4/igmp.c
++++ b/src/core/ipv4/igmp.c
+@@ -344,7 +344,7 @@ igmp_input(struct pbuf *p, struct netif *inp, const ip4_addr_t *dest)
+ 
+   /* Now calculate and check the checksum */
+   igmp = (struct igmp_msg *)p->payload;
+-  if (inet_chksum(igmp, p->len)) {
++  if (inet_chksum_pbuf(p)) {
+     pbuf_free(p);
+     IGMP_STATS_INC(igmp.chkerr);
+     LWIP_DEBUGF(IGMP_DEBUG, ("igmp_input: checksum error\n"));
+diff --git a/src/core/ipv4/ip4.c b/src/core/ipv4/ip4.c
+index b382e808..0157c359 100644
+--- a/src/core/ipv4/ip4.c
++++ b/src/core/ipv4/ip4.c
+@@ -475,6 +475,17 @@ ip4_input(struct pbuf *p, struct netif *inp)
+   IP_STATS_INC(ip.recv);
+   MIB2_STATS_INC(mib2.ipinreceives);
+ 
++  if (p->len < IP_HLEN) {
++    LWIP_DEBUGF(IP_DEBUG | LWIP_DBG_LEVEL_SERIOUS,
++                ("IP header (min len %"U16_F") does not fit in first pbuf (len %"U16_F"), IP packet dropped.\n",
++                 (u16_t)IP_HLEN, p->len));
++    pbuf_free(p);
++    IP_STATS_INC(ip.lenerr);
++    IP_STATS_INC(ip.drop);
++    MIB2_STATS_INC(mib2.ipinhdrerrors);
++    return ERR_OK;
++  }
++
+   /* identify the IP header */
+   iphdr = (struct ip_hdr *)p->payload;
+   if (IPH_V(iphdr) != 4) {
+diff --git a/src/core/ipv4/ip4_addr.c b/src/core/ipv4/ip4_addr.c
+index 79127ac9..921a350a 100644
+--- a/src/core/ipv4/ip4_addr.c
++++ b/src/core/ipv4/ip4_addr.c
+@@ -173,11 +173,18 @@ ip4addr_aton(const char *cp, ip4_addr_t *addr)
+     }
+     for (;;) {
+       if (lwip_isdigit(c)) {
+-        if((base == 8) && ((u32_t)(c - '0') >= 8))
++        u32_t d = (u32_t)(c - '0');
++        if ((base == 8) && (d >= 8))
+           break;
+-        val = (val * base) + (u32_t)(c - '0');
++        if (val > (0xffffffffUL - d) / base) {
++          return 0;
++        }
++        val = (val * base) + d;
+         c = *++cp;
+       } else if (base == 16 && lwip_isxdigit(c)) {
++        if ((val & 0xf0000000UL) != 0) {
++          return 0;
++        }
+         val = (val << 4) | (u32_t)(c + 10 - (lwip_islower(c) ? 'a' : 'A'));
+         c = *++cp;
+       } else {
+diff --git a/src/core/ipv4/ip4_frag.c b/src/core/ipv4/ip4_frag.c
+index 2652487b..9d8476dc 100644
+--- a/src/core/ipv4/ip4_frag.c
++++ b/src/core/ipv4/ip4_frag.c
+@@ -372,16 +372,28 @@ ip_reass_chain_frag_into_datagram_and_validate(struct ip_reassdata *ipr, struct
+   iprh->next_pbuf = NULL;
+   iprh->start = offset;
+   iprh->end = (u16_t)(offset + len);
+-  if (iprh->end < offset) {
+-    /* u16_t overflow, cannot handle this */
++  if ((iprh->end < offset) || (iprh->end > (0xFFFF - IP_HLEN)) || (len == 0)) {
++    /* u16_t overflow or empty fragment, cannot handle this */
+     return IP_REASS_VALIDATE_PBUF_DROPPED;
+   }
++  if ((ipr->flags & IP_REASS_FLAG_LASTFRAG) != 0) {
++    if (iprh->end > ipr->datagram_len) {
++      return IP_REASS_VALIDATE_PBUF_DROPPED;
++    }
++    if (is_last && (iprh->end != ipr->datagram_len)) {
++      return IP_REASS_VALIDATE_PBUF_DROPPED;
++    }
++  }
+ 
+   /* Iterate through until we either get to the end of the list (append),
+    * or we find one with a larger offset (insert). */
+   for (q = ipr->p; q != NULL;) {
+     iprh_tmp = (struct ip_reass_helper *)q->payload;
+     if (iprh->start < iprh_tmp->start) {
++      if (is_last) {
++        /* last fragment (MF==0) cannot precede a fragment with higher offset */
++        return IP_REASS_VALIDATE_PBUF_DROPPED;
++      }
+       /* the new pbuf should be inserted before this */
+       iprh->next_pbuf = q;
+       if (iprh_prev != NULL) {
+@@ -475,6 +487,9 @@ ip_reass_chain_frag_into_datagram_and_validate(struct ip_reassdata *ipr, struct
+           iprh_prev = iprh;
+           q = iprh->next_pbuf;
+         }
++        if (((ipr->flags & IP_REASS_FLAG_LASTFRAG) != 0) && (iprh->end != ipr->datagram_len)) {
++          valid = 0;
++        }
+         /* if still valid, all fragments are received
+          * (because to the MF==0 already arrived */
+         if (valid) {
+diff --git a/src/core/ipv6/dhcp6.c b/src/core/ipv6/dhcp6.c
+index e6a7e64d..0cd4d77e 100644
+--- a/src/core/ipv6/dhcp6.c
++++ b/src/core/ipv6/dhcp6.c
+@@ -538,8 +538,8 @@ dhcp6_handle_config_reply(struct netif *netif, struct pbuf *p_msg_in)
+ 
+     ip_addr_set_zero_ip6(&dns_addr);
+     dns_addr6 = ip_2_ip6(&dns_addr);
+-    for (n = 0, idx = op_start; (idx < op_start + op_len) && (n < LWIP_DHCP6_PROVIDE_DNS_SERVERS);
+-         n++, idx += sizeof(struct ip6_addr_packed)) {
++    for (n = 0, idx = op_start; ((u32_t)idx + sizeof(struct ip6_addr_packed) <= (u32_t)op_start + (u32_t)op_len) && (n < LWIP_DHCP6_PROVIDE_DNS_SERVERS);
++         n++, idx = (u16_t)(idx + sizeof(struct ip6_addr_packed))) {
+       u16_t copied = pbuf_copy_partial(p_msg_in, dns_addr6, sizeof(struct ip6_addr_packed), idx);
+       if (copied != sizeof(struct ip6_addr_packed)) {
+         /* pbuf length mismatch */
+@@ -561,8 +561,8 @@ dhcp6_handle_config_reply(struct netif *netif, struct pbuf *p_msg_in)
+     u16_t idx;
+     u8_t n;
+ 
+-    for (n = 0, idx = op_start; (idx < op_start + op_len) && (n < LWIP_DHCP6_MAX_NTP_SERVERS);
+-         n++, idx += sizeof(struct ip6_addr_packed)) {
++    for (n = 0, idx = op_start; ((u32_t)idx + sizeof(struct ip6_addr_packed) <= (u32_t)op_start + (u32_t)op_len) && (n < LWIP_DHCP6_MAX_NTP_SERVERS);
++         n++, idx = (u16_t)(idx + sizeof(struct ip6_addr_packed))) {
+       u16_t copied;
+       ip6_addr_t *ntp_addr6 = ip_2_ip6(&ntp_server_addrs[n]);
+       ip_addr_set_zero_ip6(&ntp_server_addrs[n]);
+@@ -654,8 +654,8 @@ dhcp6_parse_reply(struct pbuf *p, struct dhcp6 *dhcp6)
+     op = (op_len[0] << 8) | op_len[1];
+     len = (op_len[2] << 8) | op_len[3];
+     offset = val_offset + len;
+-    if (offset < val_offset) {
+-      /* overflow */
++    if ((offset < val_offset) || (offset > offset_max)) {
++      /* overflow or option extends past end of packet */
+       return ERR_BUF;
+     }
+ 
+diff --git a/src/core/ipv6/ip6.c b/src/core/ipv6/ip6.c
+index 2c25f8ad..fc16fef3 100644
+--- a/src/core/ipv6/ip6.c
++++ b/src/core/ipv6/ip6.c
+@@ -524,6 +524,16 @@ ip6_input(struct pbuf *p, struct netif *inp)
+ 
+   IP6_STATS_INC(ip6.recv);
+ 
++  if (p->len < IP6_HLEN) {
++    LWIP_DEBUGF(IP6_DEBUG | LWIP_DBG_LEVEL_SERIOUS,
++      ("IPv6 header (len %"U16_F") does not fit in first pbuf (len %"U16_F"), IP packet dropped.\n",
++          (u16_t)IP6_HLEN, p->len));
++    pbuf_free(p);
++    IP6_STATS_INC(ip6.lenerr);
++    IP6_STATS_INC(ip6.drop);
++    return ERR_OK;
++  }
++
+   /* identify the IP header */
+   ip6hdr = (struct ip6_hdr *)p->payload;
+   if (IP6H_V(ip6hdr) != 6) {
+@@ -721,6 +731,13 @@ netif_found:
+       struct ip6_opt_hdr *opt_hdr;
+       LWIP_DEBUGF(IP6_DEBUG, ("ip6_input: packet with Hop-by-Hop options header\n"));
+ 
++      if (p->len < 8) {
++        pbuf_free(p);
++        IP6_STATS_INC(ip6.lenerr);
++        IP6_STATS_INC(ip6.drop);
++        goto ip6_input_cleanup;
++      }
++
+       /* Get and check the header length, while staying in packet bounds. */
+       hbh_hdr = (struct ip6_hbh_hdr *)p->payload;
+ 
+@@ -750,6 +767,12 @@ netif_found:
+         s32_t opt_dlen = 0;
+ 
+         opt_hdr = (struct ip6_opt_hdr *)((u8_t *)hbh_hdr + opt_offset);
++        if ((IP6_OPT_TYPE(opt_hdr) != IP6_PAD1_OPTION) && ((opt_offset + IP6_OPT_HLEN) > hlen)) {
++          pbuf_free(p);
++          IP6_STATS_INC(ip6.lenerr);
++          IP6_STATS_INC(ip6.drop);
++          goto ip6_input_cleanup;
++        }
+ 
+         switch (IP6_OPT_TYPE(opt_hdr)) {
+         /* @todo: process IPV6 Hop-by-Hop option data */
+@@ -801,6 +824,12 @@ netif_found:
+ 
+         /* Adjust the offset to move to the next extended option header */
+         opt_offset = opt_offset + IP6_OPT_HLEN + opt_dlen;
++        if (opt_offset > hlen) {
++          pbuf_free(p);
++          IP6_STATS_INC(ip6.lenerr);
++          IP6_STATS_INC(ip6.drop);
++          goto ip6_input_cleanup;
++        }
+       }
+       pbuf_remove_header(p, hlen);
+       break;
+@@ -812,6 +841,13 @@ netif_found:
+       struct ip6_opt_hdr *opt_hdr;
+       LWIP_DEBUGF(IP6_DEBUG, ("ip6_input: packet with Destination options header\n"));
+ 
++      if (p->len < 8) {
++        pbuf_free(p);
++        IP6_STATS_INC(ip6.lenerr);
++        IP6_STATS_INC(ip6.drop);
++        goto ip6_input_cleanup;
++      }
++
+       dest_hdr = (struct ip6_dest_hdr *)p->payload;
+ 
+       /* Get next header type. */
+@@ -839,6 +875,12 @@ netif_found:
+         s32_t opt_dlen = 0;
+ 
+         opt_hdr = (struct ip6_opt_hdr *)((u8_t *)dest_hdr + opt_offset);
++        if ((IP6_OPT_TYPE(opt_hdr) != IP6_PAD1_OPTION) && ((opt_offset + IP6_OPT_HLEN) > hlen)) {
++          pbuf_free(p);
++          IP6_STATS_INC(ip6.lenerr);
++          IP6_STATS_INC(ip6.drop);
++          goto ip6_input_cleanup;
++        }
+ 
+         switch (IP6_OPT_TYPE(opt_hdr))
+         {
+@@ -895,6 +937,12 @@ netif_found:
+ 
+         /* Adjust the offset to move to the next extended option header */
+         opt_offset = opt_offset + IP6_OPT_HLEN + opt_dlen;
++        if (opt_offset > hlen) {
++          pbuf_free(p);
++          IP6_STATS_INC(ip6.lenerr);
++          IP6_STATS_INC(ip6.drop);
++          goto ip6_input_cleanup;
++        }
+       }
+ 
+       pbuf_remove_header(p, hlen);
+@@ -905,6 +953,13 @@ netif_found:
+       struct ip6_rout_hdr *rout_hdr;
+       LWIP_DEBUGF(IP6_DEBUG, ("ip6_input: packet with Routing header\n"));
+ 
++      if (p->len < 8) {
++        pbuf_free(p);
++        IP6_STATS_INC(ip6.lenerr);
++        IP6_STATS_INC(ip6.drop);
++        goto ip6_input_cleanup;
++      }
++
+       rout_hdr = (struct ip6_rout_hdr *)p->payload;
+ 
+       /* Get next header type. */
+diff --git a/src/core/ipv6/ip6_addr.c b/src/core/ipv6/ip6_addr.c
+index 6e0ac86b..e2c1ec60 100644
+--- a/src/core/ipv6/ip6_addr.c
++++ b/src/core/ipv6/ip6_addr.c
+@@ -73,6 +73,7 @@ ip6addr_aton(const char *cp, ip6_addr_t *addr)
+ {
+   u32_t addr_index, zero_blocks, current_block_index, current_block_value;
+   const char *s;
++  int saw_double_colon = 0;
+ #if LWIP_IPV4
+   int check_ipv4_mapped = 0;
+ #endif /* LWIP_IPV4 */
+@@ -82,6 +83,9 @@ ip6addr_aton(const char *cp, ip6_addr_t *addr)
+   zero_blocks = 8;
+   for (s = cp; *s != 0; s++) {
+     if (*s == ':') {
++      if (zero_blocks == 0) {
++        return 0;
++      }
+       zero_blocks--;
+ #if LWIP_IPV4
+     } else if (*s == '.') {
+@@ -137,10 +141,11 @@ ip6addr_aton(const char *cp, ip6_addr_t *addr)
+         return 0;
+       }
+       if (s[1] == ':') {
+-        if (s[2] == ':') {
+-          /* invalid format: three successive colons */
++        if (s[2] == ':' || saw_double_colon) {
++          /* invalid format: three successive colons or multiple "::" */
+           return 0;
+         }
++        saw_double_colon = 1;
+         s++;
+         /* "::" found, set zeros */
+         while (zero_blocks > 0) {
+@@ -161,6 +166,9 @@ ip6addr_aton(const char *cp, ip6_addr_t *addr)
+       }
+     } else if (lwip_isxdigit(*s)) {
+       /* add current digit */
++      if ((current_block_value & 0xf000UL) != 0) {
++        return 0;
++      }
+       current_block_value = (current_block_value << 4) +
+           (lwip_isdigit(*s) ? (u32_t)(*s - '0') :
+           (u32_t)(10 + (lwip_islower(*s) ? *s - 'a' : *s - 'A')));
+diff --git a/src/core/ipv6/ip6_frag.c b/src/core/ipv6/ip6_frag.c
+index 66b12509..4470dfbc 100644
+--- a/src/core/ipv6/ip6_frag.c
++++ b/src/core/ipv6/ip6_frag.c
+@@ -309,8 +309,9 @@ ip6_reass(struct pbuf *p)
+   }
+   len = (u16_t)(len - hdrdiff);
+   start = (offset & IP6_FRAG_OFFSET_MASK);
+-  if (start > (0xFFFF - len)) {
+-    /* u16_t overflow, cannot handle this */
++  if ((len == 0) || (hdrdiff > (0xFFFF - IP6_HLEN)) ||
++      (start > (0xFFFF - IP6_HLEN - (u16_t)(hdrdiff - IP6_FRAG_HLEN) - len))) {
++    /* u16_t overflow when restoring IPv6 + unfragmentable headers, cannot handle this */
+     IP6_FRAG_STATS_INC(ip6_frag.proterr);
+     goto nullreturn;
+   }
+@@ -563,6 +564,9 @@ ip6_reass(struct pbuf *p)
+     iprh_prev = iprh;
+     q = iprh->next_pbuf;
+   }
++  if (valid && (iprh->end != ipr->datagram_len)) {
++    valid = 0;
++  }
+ 
+   if (valid) {
+     /* All fragments have been received */
+diff --git a/src/core/ipv6/nd6.c b/src/core/ipv6/nd6.c
+index 5ad50e21..fa70aaec 100644
+--- a/src/core/ipv6/nd6.c
++++ b/src/core/ipv6/nd6.c
+@@ -327,6 +327,10 @@ static void
+ nd6_store_neighbor_lladdr(struct nd6_neighbor_cache_entry *entry,
+                           struct lladdr_option *opt, struct netif *netif)
+ {
++  if ((opt == NULL) || (opt->length == 0) ||
++      ((u16_t)(opt->length << 3) < ND6_LLADDR_OPTION_MIN_LENGTH)) {
++    return;
++  }
+   u16_t copy_len = LWIP_MIN((opt->length << 3) - ND6_LLADDR_OPTION_MIN_LENGTH,
+                             netif->hwaddr_len);
+   SMEMCPY(entry->lladdr, opt->addr, LWIP_MIN(copy_len, NETIF_MAX_HWADDR_LEN));
+@@ -347,6 +351,13 @@ nd6_input(struct pbuf *p, struct netif *inp)
+ 
+   ND6_STATS_INC(nd6.recv);
+ 
++  if (p->len < sizeof(struct icmp6_hdr)) {
++    pbuf_free(p);
++    ND6_STATS_INC(nd6.lenerr);
++    ND6_STATS_INC(nd6.drop);
++    return;
++  }
++
+   msg_type = *((u8_t *)p->payload);
+   switch (msg_type) {
+   case ICMP6_TYPE_NA: /* Neighbor Advertisement. */
+diff --git a/src/netif/bridgeif.c b/src/netif/bridgeif.c
+index 05cdc5d3..44f8d723 100644
+--- a/src/netif/bridgeif.c
++++ b/src/netif/bridgeif.c
+@@ -340,6 +340,9 @@ bridgeif_input(struct pbuf *p, struct netif *netif)
+   if (p == NULL || netif == NULL) {
+     return ERR_VAL;
+   }
++  if (p->len < SIZEOF_ETH_HDR) {
++    return ERR_VAL;
++  }
+   port = (bridgeif_port_t *)netif_get_client_data(netif, bridgeif_netif_client_id);
+   LWIP_ASSERT("port data not set", port != NULL);
+   if (port == NULL || port->bridge == NULL) {
+diff --git a/src/netif/lowpan6.c b/src/netif/lowpan6.c
+index 365df793..73a36308 100644
+--- a/src/netif/lowpan6.c
++++ b/src/netif/lowpan6.c
+@@ -414,7 +414,7 @@ lowpan6_frag(struct netif *netif, struct pbuf *p, const struct lowpan6_link_addr
+   /* Calculate remaining packet length */
+   remaining_len = p->tot_len;
+ 
+-  if (remaining_len > 0x7FF) {
++  if (((u32_t)remaining_len + (u32_t)hidden_header_len) > 0x7FFU) {
+     MIB2_STATS_NETIF_INC(netif, ifoutdiscards);
+     /* datagram_size must fit into 11 bit */
+     pbuf_free(p_frag);
+@@ -599,6 +599,10 @@ lowpan6_output(struct netif *netif, struct pbuf *q, const ip6_addr_t *ip6addr)
+ #endif /* LWIP_6LOWPAN_INFER_SHORT_ADDRESS */
+ 
+ #if LWIP_6LOWPAN_INFER_SHORT_ADDRESS
++  if (q->len < IP6_HLEN) {
++    MIB2_STATS_NETIF_INC(netif, ifoutdiscards);
++    return ERR_VAL;
++  }
+   /* Check if we can compress source address (use aligned copy) */
+   ip6_hdr = (struct ip6_hdr *)q->payload;
+   ip6_addr_copy_from_packed(ip6_src, ip6_hdr->src);
+@@ -807,13 +811,19 @@ lowpan6_input(struct pbuf *p, struct netif *netif)
+     LWIP_ASSERT("p->next == NULL", p->next == NULL);
+     if (lrh->reass != NULL) {
+       /* FRAG1 already received, check this offset against first len */
+-      if (datagram_offset < lrh->reass->len) {
++      if (datagram_offset < lrh->reass->tot_len) {
+         /* fragment overlap, discard old fragments */
+         dequeue_datagram(lrh, lrh_prev);
+         free_reass_datagram(lrh);
+         goto lowpan6_input_discard;
+       }
+     }
++    if ((u32_t)datagram_offset + (u32_t)(p->len - 1) > (u32_t)datagram_size) {
++      /* fragment extends past datagram_size, discard */
++      dequeue_datagram(lrh, lrh_prev);
++      free_reass_datagram(lrh);
++      goto lowpan6_input_discard;
++    }
+     if (lrh->frags == NULL) {
+       /* first FRAGN */
+       lrh->frags = p;
+@@ -843,6 +853,11 @@ lowpan6_input(struct pbuf *p, struct netif *netif)
+           /* duplicate, ignore */
+           pbuf_free(p);
+           return ERR_OK;
++        } else if (q_datagram_offset + q_frag_len > datagram_offset) {
++          /* overlap with preceding fragment, discard old fragments */
++          dequeue_datagram(lrh, lrh_prev);
++          free_reass_datagram(lrh);
++          goto lowpan6_input_discard;
+         }
+       }
+       /* insert fragment */
+@@ -855,7 +870,7 @@ lowpan6_input(struct pbuf *p, struct netif *netif)
+     }
+     /* check if all fragments were received */
+     if (lrh->reass) {
+-      u16_t offset = lrh->reass->len;
++      u16_t offset = lrh->reass->tot_len;
+       struct pbuf *q;
+       for (q = lrh->frags; q != NULL; q = q->next) {
+         u16_t q_datagram_offset = ((u8_t *)q->payload)[0] << 3;
+@@ -867,7 +882,8 @@ lowpan6_input(struct pbuf *p, struct netif *netif)
+       }
+       if (offset == datagram_size) {
+         /* all fragments received, combine pbufs */
+-        u16_t datagram_left = datagram_size - lrh->reass->len;
++        u16_t frags_tot_len = (u16_t)(datagram_size - lrh->reass->tot_len);
++        u16_t datagram_left = frags_tot_len;
+         for (q = lrh->frags; q != NULL; q = q->next) {
+           /* hide datagram_offset byte now */
+           pbuf_remove_header(q, 1);
+@@ -875,9 +891,12 @@ lowpan6_input(struct pbuf *p, struct netif *netif)
+           datagram_left -= q->len;
+         }
+         LWIP_ASSERT("datagram_left == 0", datagram_left == 0);
+-        q = lrh->reass;
+-        q->tot_len = datagram_size;
++        for (q = lrh->reass; q->next != NULL; q = q->next) {
++          q->tot_len = (u16_t)(q->tot_len + frags_tot_len);
++        }
++        q->tot_len = (u16_t)(q->tot_len + frags_tot_len);
+         q->next = lrh->frags;
++        q = lrh->reass;
+         lrh->frags = NULL;
+         lrh->reass = NULL;
+         dequeue_datagram(lrh, lrh_prev);
+diff --git a/src/netif/lowpan6_ble.c b/src/netif/lowpan6_ble.c
+index cca8bb17..55ac6fb2 100644
+--- a/src/netif/lowpan6_ble.c
++++ b/src/netif/lowpan6_ble.c
+@@ -348,6 +348,13 @@ rfc7668_input(struct pbuf * p, struct netif *netif)
+ {
+   u8_t * puc;
+ 
++  if ((p == NULL) || (p->len < 1)) {
++    if (p != NULL) {
++      pbuf_free(p);
++    }
++    return ERR_OK;
++  }
++
+   MIB2_STATS_NETIF_ADD(netif, ifinoctets, p->tot_len);
+ 
+   /* Load first header byte */
+diff --git a/src/netif/ppp/pppoe.c b/src/netif/ppp/pppoe.c
+index 9e4f3468..14f9a7ba 100644
+--- a/src/netif/ppp/pppoe.c
++++ b/src/netif/ppp/pppoe.c
+@@ -457,7 +457,7 @@ pppoe_disc_input(struct netif *netif, struct pbuf *pb)
+     MEMCPY(&pt, (u8_t*)pb->payload + off, sizeof(pt));
+     tag = lwip_ntohs(pt.tag);
+     len = lwip_ntohs(pt.len);
+-    if (off + sizeof(pt) + len > pb->len) {
++    if ((u32_t)off + sizeof(pt) + (u32_t)len > (u32_t)pb->len) {
+       PPPDEBUG(LOG_DEBUG, ("pppoe: tag 0x%x len 0x%x is too long\n", tag, len));
+       goto done;
+     }
+@@ -673,10 +673,13 @@ pppoe_data_input(struct netif *netif, struct pbuf *pb)
+   struct pppoe_softc *sc;
+   struct pppoehdr *ph;
+ #ifdef PPPOE_TERM_UNKNOWN_SESSIONS
+-  u8_t shost[ETHER_ADDR_LEN];
++  u8_t shost[ETH_HWADDR_LEN];
+ #endif
+ 
+ #ifdef PPPOE_TERM_UNKNOWN_SESSIONS
++  if (pb->len < sizeof(struct eth_hdr)) {
++    goto drop;
++  }
+   MEMCPY(shost, ((struct eth_hdr *)pb->payload)->src.addr, sizeof(shost));
+ #endif
+   if (pbuf_remove_header(pb, sizeof(struct eth_hdr)) != 0) {
+@@ -726,6 +729,9 @@ pppoe_data_input(struct netif *netif, struct pbuf *pb)
+   if (pb->tot_len < plen) {
+     goto drop;
+   }
++  if (pb->tot_len > plen) {
++    pbuf_realloc(pb, plen);
++  }
+ 
+   /* Dispatch the packet thereby consuming it. */
+   ppp_input(sc->pcb, pb);
+diff --git a/src/netif/ppp/vj.c b/src/netif/ppp/vj.c
+index 7f0b206e..ff027e9d 100644
+--- a/src/netif/ppp/vj.c
++++ b/src/netif/ppp/vj.c
+@@ -50,9 +50,8 @@ vj_compress_init(struct vjcompress *comp)
+   u8_t i;
+   struct cstate *tstate = comp->tstate;
+ 
+-#if MAX_SLOTS == 0
+   memset((char *)comp, 0, sizeof(*comp));
+-#endif
++  tstate = comp->tstate;
+   comp->maxSlotIndex = MAX_SLOTS - 1;
+   comp->compressSlot = 0;    /* Disable slot ID compression by default. */
+   for (i = MAX_SLOTS - 1; i > 0; --i) {
+@@ -94,7 +93,9 @@ vj_compress_init(struct vjcompress *comp)
+ }
+ 
+ #define DECODEL(f) { \
++  if (cp >= cp_end) goto bad; \
+   if (*cp == 0) {\
++    if ((size_t)(cp_end - cp) < 3) goto bad; \
+     u32_t tmp_ = lwip_ntohl(f) + ((cp[1] << 8) | cp[2]); \
+     (f) = lwip_htonl(tmp_); \
+     cp += 3; \
+@@ -105,7 +106,9 @@ vj_compress_init(struct vjcompress *comp)
+ }
+ 
+ #define DECODES(f) { \
++  if (cp >= cp_end) goto bad; \
+   if (*cp == 0) {\
++    if ((size_t)(cp_end - cp) < 3) goto bad; \
+     u16_t tmp_ = lwip_ntohs(f) + (((u16_t)cp[1] << 8) | cp[2]); \
+     (f) = lwip_htons(tmp_); \
+     cp += 3; \
+@@ -116,7 +119,9 @@ vj_compress_init(struct vjcompress *comp)
+ }
+ 
+ #define DECODEU(f) { \
++  if (cp >= cp_end) goto bad; \
+   if (*cp == 0) {\
++    if ((size_t)(cp_end - cp) < 3) goto bad; \
+     (f) = lwip_htons(((u16_t)cp[1] << 8) | cp[2]); \
+     cp += 3; \
+   } else { \
+@@ -502,6 +507,7 @@ int
+ vj_uncompress_tcp(struct pbuf **nb, struct vjcompress *comp)
+ {
+   u8_t *cp;
++  u8_t *cp_end;
+   struct tcp_hdr *th;
+   struct cstate *cs;
+   struct vj_u16_t *bp;
+@@ -510,14 +516,18 @@ vj_uncompress_tcp(struct pbuf **nb, struct vjcompress *comp)
+   u32_t vjlen, hlen, changes;
+ 
+   INCR(vjs_compressedin);
++  if (n0->len < 3) {
++    goto bad;
++  }
+   cp = (u8_t*)n0->payload;
++  cp_end = cp + n0->len;
+   changes = *cp++;
+   if (changes & NEW_C) {
+     /*
+      * Make sure the state index is in range, then grab the state.
+      * If we have a good state index, clear the 'discard' flag.
+      */
+-    if (*cp >= MAX_SLOTS) {
++    if ((n0->len < 4) || (*cp >= MAX_SLOTS)) {
+       PPPDEBUG(LOG_INFO, ("vj_uncompress_tcp: bad cid=%d\n", *cp));
+       goto bad;
+     }
+@@ -530,7 +540,7 @@ vj_uncompress_tcp(struct pbuf **nb, struct vjcompress *comp)
+      * had a line error since the last time we got an
+      * explicit state index, we have to toss the packet.
+      */
+-    if (comp->flags & VJF_TOSS) {
++    if ((comp->flags & VJF_TOSS) || (comp->last_recv >= MAX_SLOTS)) {
+       PPPDEBUG(LOG_INFO, ("vj_uncompress_tcp: tossing\n"));
+       INCR(vjs_tossed);
+       return (-1);
+@@ -538,6 +548,11 @@ vj_uncompress_tcp(struct pbuf **nb, struct vjcompress *comp)
+   }
+   cs = &comp->rstate[comp->last_recv];
+   hlen = IPH_HL(&cs->cs_ip) << 2;
++  if ((cs->cs_hlen < (sizeof(struct ip_hdr) + sizeof(struct tcp_hdr))) ||
++      (cs->cs_hlen > MAX_HDR) || (hlen < sizeof(struct ip_hdr)) ||
++      ((hlen + sizeof(struct tcp_hdr)) > cs->cs_hlen)) {
++    goto bad;
++  }
+   th = (struct tcp_hdr *)&((u8_t*)&cs->cs_ip)[hlen];
+   th->chksum = lwip_htons((*cp << 8) | cp[1]);
+   cp += 2;
+diff --git a/src/netif/slipif.c b/src/netif/slipif.c
+index c8e4eb37..2c08e599 100644
+--- a/src/netif/slipif.c
++++ b/src/netif/slipif.c
+@@ -259,7 +259,7 @@ slipif_rxbyte(struct netif *netif, u8_t c)
+   } /* end switch (priv->state) */
+ 
+   /* byte received, packet not yet completely received */
+-  if (priv->p == NULL) {
++  if ((priv->p == NULL) && (priv->recved < SLIP_MAX_SIZE)) {
+     /* allocate a new pbuf */
+     LWIP_DEBUGF(SLIP_DEBUG, ("slipif_input: alloc\n"));
+     priv->p = pbuf_alloc(PBUF_LINK, (PBUF_POOL_BUFSIZE - PBUF_LINK_HLEN - PBUF_LINK_ENCAPSULATION_HLEN), PBUF_POOL);
+@@ -280,8 +280,8 @@ slipif_rxbyte(struct netif *netif, u8_t c)
+     }
+   }
+ 
+-  /* this automatically drops bytes if > SLIP_MAX_SIZE */
+-  if ((priv->p != NULL) && (priv->recved <= SLIP_MAX_SIZE)) {
++  /* this automatically drops bytes if >= SLIP_MAX_SIZE */
++  if ((priv->p != NULL) && (priv->recved < SLIP_MAX_SIZE)) {
+     ((u8_t *)priv->p->payload)[priv->i] = c;
+     priv->recved++;
+     priv->i++;
+@@ -497,7 +497,7 @@ slipif_rxbyte_enqueue(struct netif *netif, u8_t data)
+     if (priv->rxpackets != NULL) {
+ #if SLIP_RX_QUEUE
+       /* queue multiple pbufs */
+-      struct pbuf *q = p;
++      struct pbuf *q = priv->rxpackets;
+       while (q->next != NULL) {
+         q = q->next;
+       }
+diff --git a/src/netif/zepif.c b/src/netif/zepif.c
+index de43b99b..155b8385 100644
+--- a/src/netif/zepif.c
++++ b/src/netif/zepif.c
+@@ -143,7 +143,7 @@ zepif_udp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
+   if (zep->crc_mode != 1) {
+     goto err_return;
+   }
+-  if (zep->len != p->tot_len - sizeof(struct zep_hdr)) {
++  if ((zep->len < 2) || (zep->len != p->tot_len - sizeof(struct zep_hdr))) {
+     goto err_return;
+   }
+   /* everything seems to be OK, hide the ZEP header */

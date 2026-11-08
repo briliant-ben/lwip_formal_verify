@@ -1,0 +1,8 @@
+# Upstream lwIP checkout (fetch at the pinned commit and apply the patch, see README.md)
+/lwip/
+# Build artifacts
+/build_objs/
+/build_suite_*
+/build_upstream_*
+*.log
+.vscode/
