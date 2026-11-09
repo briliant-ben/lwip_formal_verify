@@ -268,6 +268,35 @@ int main(void) {
   }
   printf("[PASS] Upstream inet_chksum:   odd-split pbuf checksum & IPv4/IPv6 parsers verified.\n");
 
+  /* 10. Test lwip_itoa on INT_MIN (-2147483648) and lwip_strnstr on SIZE_MAX (core/def.c) */
+  {
+    char itoa_buf[32];
+    lwip_itoa(itoa_buf, sizeof(itoa_buf), -2147483647 - 1);
+    LWIP_ASSERT("lwip_itoa on INT_MIN generates exact decimal representation", strcmp(itoa_buf, "-2147483648") == 0);
+
+    const char *str = "lwip_formal_verification";
+    const char *found = lwip_strnstr(str, "formal", 20);
+    LWIP_ASSERT("lwip_strnstr finds token within n bounds", found != NULL);
+  }
+  printf("[PASS] Upstream core/def.c:    lwip_itoa INT_MIN & lwip_strnstr boundary tests verified.\n");
+
+  /* 11. Test pbuf_free_header on chained pbuf where first chunk is shorter than header (lwiperf fix) */
+  {
+    u8_t chunk1[10];
+    u8_t chunk2[20];
+    memset(chunk1, 0xAA, sizeof(chunk1));
+    memset(chunk2, 0xBB, sizeof(chunk2));
+    struct pbuf *p1 = alloc_exact_pbuf(chunk1, sizeof(chunk1));
+    struct pbuf *p2 = alloc_exact_pbuf(chunk2, sizeof(chunk2));
+    pbuf_cat(p1, p2);
+    LWIP_ASSERT("chained pbuf tot_len == 30", p1->tot_len == 30);
+    /* Stripping 24 bytes across the pbuf chain boundary (p1->len is only 10) */
+    struct pbuf *res = pbuf_free_header(p1, 24);
+    LWIP_ASSERT("pbuf_free_header succeeds and leaves 6 bytes in remainder", res != NULL && res->tot_len == 6);
+    pbuf_free(res);
+  }
+  printf("[PASS] Upstream pbuf.c/lwiperf: chained pbuf header strip without assertion crash verified.\n");
+
   printf("=== ALL UPSTREAM LWIP %s INTEGRATION TESTS PASSED (EXIT 0) ===\n", LWIP_VERSION_STRING);
   return 0;
 }

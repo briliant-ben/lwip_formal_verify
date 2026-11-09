@@ -43,17 +43,21 @@ LWIP_SRCS := \
 	lwip/src/apps/snmp/snmp_threadsync.c \
 	lwip/src/apps/snmp/snmp_traps.c \
 	lwip/src/apps/snmp/snmpv3.c \
-	lwip/src/apps/http/http_client.c
+	lwip/src/apps/http/http_client.c \
+	lwip/src/apps/http/fs.c \
+	lwip/src/apps/http/httpd.c \
+	lwip/src/apps/lwiperf/lwiperf.c \
+	lwip/src/apps/smtp/smtp.c
 
 .PHONY: all verify clean
 
 all: verify
 
 verify:
-	@echo "=== [1/4] Building Standalone 30-Theorem Formal Verification Suite (Sanitizer & Plain -O2) ==="
+	@echo "=== [1/4] Building Standalone 40-Theorem Formal Verification Suite (Sanitizer & Plain -O2) ==="
 	$(CC) $(SAN_CFLAGS) lwip_formal_verification_suite.c -o build_suite_asan
 	$(CC) $(PLAIN_CFLAGS) lwip_formal_verification_suite.c -o build_suite_plain
-	@echo "=== [2/4] Running Theorem A (Sanitizer), Theorem C (Plain -O2), and Theorem B (diff -u) on 30-Theorem Suite ==="
+	@echo "=== [2/4] Running Theorem A (Sanitizer), Theorem C (Plain -O2), and Theorem B (diff -u) on 40-Theorem Suite ==="
 	./build_suite_asan > trace_suite_asan.log
 	./build_suite_plain > trace_suite_plain.log
 	diff -u trace_suite_asan.log trace_suite_plain.log

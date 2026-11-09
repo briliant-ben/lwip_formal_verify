@@ -1,3 +1,37 @@
+diff --git a/src/api/sockets.c b/src/api/sockets.c
+index fe67e106..83f80c5c 100644
+--- a/src/api/sockets.c
++++ b/src/api/sockets.c
+@@ -1524,15 +1524,11 @@ lwip_sendmsg(int s, const struct msghdr *msg, int flags)
+     }
+ #if LWIP_NETIF_TX_SINGLE_PBUF
+     for (i = 0; i < msg->msg_iovlen; i++) {
+-      size += msg->msg_iov[i].iov_len;
+-      if ((msg->msg_iov[i].iov_len > INT_MAX) || (size < (int)msg->msg_iov[i].iov_len)) {
++      if ((msg->msg_iov[i].iov_len > 0xFFFF) || (size > 0xFFFF - (ssize_t)msg->msg_iov[i].iov_len)) {
+         /* overflow */
+         goto sendmsg_emsgsize;
+       }
+-    }
+-    if (size > 0xFFFF) {
+-      /* overflow */
+-      goto sendmsg_emsgsize;
++      size += (ssize_t)msg->msg_iov[i].iov_len;
+     }
+     /* Allocate a new netbuf and copy the data into it. */
+     if (netbuf_alloc(&chain_buf, (u16_t)size) == NULL) {
+@@ -3720,7 +3716,10 @@ lwip_setsockopt_impl(int s, int level, int optname, const void *optval, socklen_
+           const struct ipv6_mreq *imr = (const struct ipv6_mreq *)optval;
+           LWIP_SOCKOPT_CHECK_OPTLEN_CONN_PCB_TYPE(sock, optlen, struct ipv6_mreq, NETCONN_UDP);
+           inet6_addr_to_ip6addr(&multi_addr, &imr->ipv6mr_multiaddr);
+-          LWIP_ASSERT("Invalid netif index", imr->ipv6mr_interface <= 0xFFu);
++          if (imr->ipv6mr_interface > 0xFFu) {
++            err = EADDRNOTAVAIL;
++            break;
++          }
+           netif = netif_get_by_index((u8_t)imr->ipv6mr_interface);
+           if (netif == NULL) {
+             err = EADDRNOTAVAIL;
 diff --git a/src/apps/http/http_client.c b/src/apps/http/http_client.c
 index 32c6f6c2..1c632f74 100644
 --- a/src/apps/http/http_client.c
@@ -43,6 +77,70 @@ index 32c6f6c2..1c632f74 100644
        pbuf_cat(req->rx_hdrs, p);
      }
      if (req->parse_state == HTTPC_PARSE_WAIT_FIRST_LINE) {
+diff --git a/src/apps/http/httpd.c b/src/apps/http/httpd.c
+index 90fb541b..84f0b949 100644
+--- a/src/apps/http/httpd.c
++++ b/src/apps/http/httpd.c
+@@ -1606,7 +1606,7 @@ http_send(struct altcp_pcb *pcb, struct http_state *hs)
+ #if LWIP_HTTPD_FS_ASYNC_READ
+   /* Check if we are allowed to read from this file.
+      (e.g. SSI might want to delay sending until data is available) */
+-  if (!fs_is_file_ready(hs->handle, http_continue, hs)) {
++  if ((hs->handle != NULL) && !fs_is_file_ready(hs->handle, http_continue, hs)) {
+     return 0;
+   }
+ #endif /* LWIP_HTTPD_FS_ASYNC_READ */
+@@ -1648,7 +1648,7 @@ http_send(struct altcp_pcb *pcb, struct http_state *hs)
+     data_to_send = http_send_data_nonssi(pcb, hs);
+   }
+ 
+-  if ((hs->left == 0) && (fs_bytes_left(hs->handle) <= 0)) {
++  if ((hs->left == 0) && ((hs->handle == NULL) || (fs_bytes_left(hs->handle) <= 0))) {
+     /* We reached the end of the file so this request is done.
+      * This adds the FIN flag right into the last data segment. */
+     LWIP_DEBUGF(HTTPD_DEBUG, ("End of file.\n"));
+diff --git a/src/apps/lwiperf/lwiperf.c b/src/apps/lwiperf/lwiperf.c
+index 7e05b024..4cb25c8b 100644
+--- a/src/apps/lwiperf/lwiperf.c
++++ b/src/apps/lwiperf/lwiperf.c
+@@ -458,7 +458,6 @@ lwiperf_tx_start_passive(lwiperf_state_tcp_t *conn)
+ static err_t
+ lwiperf_tcp_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
+ {
+-  u8_t tmp;
+   u16_t tot_len;
+   u32_t packet_idx;
+   struct pbuf *q;
+@@ -528,9 +527,11 @@ lwiperf_tcp_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err)
+       return ERR_OK;
+     }
+     conn->next_num = 4; /* 24 bytes received... */
+-    tmp = pbuf_remove_header(p, 24);
+-    LWIP_ASSERT("pbuf_remove_header failed", tmp == 0);
+-    LWIP_UNUSED_ARG(tmp); /* for LWIP_NOASSERT */
++    p = pbuf_free_header(p, 24);
++    if (p == NULL) {
++      tcp_recved(tpcb, tot_len);
++      return ERR_OK;
++    }
+   }
+ 
+   packet_idx = 0;
+diff --git a/src/apps/mdns/mdns.c b/src/apps/mdns/mdns.c
+index b3ca2f35..e096641f 100644
+--- a/src/apps/mdns/mdns.c
++++ b/src/apps/mdns/mdns.c
+@@ -1705,7 +1705,9 @@ mdns_handle_tc_question(void *arg)
+   struct mdns_packet *pkt = (struct mdns_packet *)arg;
+   struct netif *from = netif_get_by_index(pkt->pbuf->if_idx);
+   /* timer as elapsed, now handle this question */
+-  mdns_handle_question(pkt, from);
++  if ((from != NULL) && (NETIF_TO_HOST(from) != NULL)) {
++    mdns_handle_question(pkt, from);
++  }
+   /* remove from pending list */
+   if (pending_tc_questions == pkt) {
+     pending_tc_questions = pkt->next_tc_question;
 diff --git a/src/apps/mdns/mdns_domain.c b/src/apps/mdns/mdns_domain.c
 index 265b5e6a..29f37424 100644
 --- a/src/apps/mdns/mdns_domain.c
@@ -121,6 +219,19 @@ index 7df4e75c..67b2ee39 100644
          /* check the request type */
          if (netbios_question_hdr->type == PP_HTONS(NETB_QTYPE_NB)) {
            /* if the packet is for us */
+diff --git a/src/apps/smtp/smtp.c b/src/apps/smtp/smtp.c
+index ae4b859d..0ebd0b52 100644
+--- a/src/apps/smtp/smtp.c
++++ b/src/apps/smtp/smtp.c
+@@ -1080,7 +1080,7 @@ smtp_prepare_auth_or_mail(struct smtp_session *s, u16_t *tx_buf_len)
+       u16_t auth_line_len = (u16_t)(crlf - auth);
+       u16_t safe_auth_line_len = (auth_line_len < SMTP_TX_BUF_LEN) ? auth_line_len : SMTP_TX_BUF_LEN;
+       u16_t copied = pbuf_copy_partial(s->p, s->tx_buf, safe_auth_line_len, auth);
+-      if (copied != 0) {
++      if (copied >= SMTP_KEYWORD_AUTH_LEN) {
+         char *sep = s->tx_buf + SMTP_KEYWORD_AUTH_LEN;
+         s->tx_buf[copied] = 0;
+ #if SMTP_SUPPORT_AUTH_PLAIN
 diff --git a/src/apps/snmp/snmp_msg.c b/src/apps/snmp/snmp_msg.c
 index 156b36e3..36d8e039 100644
 --- a/src/apps/snmp/snmp_msg.c
@@ -187,6 +298,58 @@ index 122b8c79..a90b8f14 100644
          close_handle();
        }
        break;
+diff --git a/src/core/def.c b/src/core/def.c
+index 11ad31b6..72f8de35 100644
+--- a/src/core/def.c
++++ b/src/core/def.c
+@@ -109,7 +109,7 @@ lwip_strnstr(const char *buffer, const char *token, size_t n)
+   if (tokenlen == 0) {
+     return LWIP_CONST_CAST(char *, buffer);
+   }
+-  for (p = buffer; *p && (p + tokenlen <= buffer + n); p++) {
++  for (p = buffer; *p && (tokenlen <= n) && ((size_t)(p - buffer) <= n - tokenlen); p++) {
+     if ((*p == *token) && (strncmp(p, token, tokenlen) == 0)) {
+       return LWIP_CONST_CAST(char *, p);
+     }
+@@ -132,7 +132,7 @@ lwip_strnistr(const char *buffer, const char *token, size_t n)
+   if (tokenlen == 0) {
+     return LWIP_CONST_CAST(char *, buffer);
+   }
+-  for (p = buffer; *p && (p + tokenlen <= buffer + n); p++) {
++  for (p = buffer; *p && (tokenlen <= n) && ((size_t)(p - buffer) <= n - tokenlen); p++) {
+     if (lwip_strnicmp(p, token, tokenlen) == 0) {
+       return LWIP_CONST_CAST(char *, p);
+     }
+@@ -187,6 +187,10 @@ lwip_strnicmp(const char *str1, const char *str2, size_t len)
+ {
+   char c1, c2;
+ 
++  if (len == 0) {
++    return 0;
++  }
++
+   do {
+     c1 = *str1++;
+     c2 = *str2++;
+@@ -222,8 +226,8 @@ void
+ lwip_itoa(char *result, size_t bufsize, int number)
+ {
+   char *res = result;
+-  char *tmp = result + bufsize - 1;
+-  int n = (number >= 0) ? number : -number;
++  char *tmp;
++  unsigned int n = (number >= 0) ? (unsigned int)number : (0U - (unsigned int)number);
+ 
+   /* handle invalid bufsize */
+   if (bufsize < 2) {
+@@ -232,6 +236,7 @@ lwip_itoa(char *result, size_t bufsize, int number)
+     }
+     return;
+   }
++  tmp = result + bufsize - 1;
+ 
+   /* First, add sign */
+   if (number < 0) {
 diff --git a/src/core/dns.c b/src/core/dns.c
 index 6540f143..1b4d13de 100644
 --- a/src/core/dns.c
@@ -785,6 +948,246 @@ index cca8bb17..55ac6fb2 100644
    MIB2_STATS_NETIF_ADD(netif, ifinoctets, p->tot_len);
  
    /* Load first header byte */
+diff --git a/src/netif/ppp/ccp.c b/src/netif/ppp/ccp.c
+index 86ecb9fb..8e203504 100644
+--- a/src/netif/ppp/ccp.c
++++ b/src/netif/ppp/ccp.c
+@@ -462,6 +462,8 @@ static void ccp_input(ppp_pcb *pcb, u_char *p, int len) {
+      */
+     oldstate = f->state;
+     fsm_input(f, p, len);
++    if (len < HEADERLEN)
++	return;
+     if (oldstate == PPP_FSM_OPENED && p[0] == TERMREQ && f->state != PPP_FSM_OPENED) {
+ 	ppp_notice(("Compression disabled by peer."));
+ #if MPPE_SUPPORT
+diff --git a/src/netif/ppp/chap-new.c b/src/netif/ppp/chap-new.c
+index 6f6e44f9..e2caef66 100644
+--- a/src/netif/ppp/chap-new.c
++++ b/src/netif/ppp/chap-new.c
+@@ -291,7 +291,7 @@ static void  chap_handle_response(ppp_pcb *pcb, int id,
+ 		const unsigned char *, const unsigned char *, char *, int);
+ #endif /* UNUSED */
+ 	char rname[MAXNAMELEN+1];
+-	char message[256];
++	char message[256] = "";
+ 
+ 	if ((pcb->chap_server.flags & LOWERUP) == 0)
+ 		return;
+@@ -441,6 +441,11 @@ static void chap_respond(ppp_pcb *pcb, int id,
+ 	char rname[MAXNAMELEN+1];
+ 	char secret[MAXSECRETLEN+1];
+ 
++	if ((pcb->chap_client.flags & (LOWERUP | AUTH_STARTED)) != (LOWERUP | AUTH_STARTED))
++		return;		/* not ready */
++	if (len < 2 || len < pkt[0] + 1)
++		return;		/* too short */
++
+ 	p = pbuf_alloc(PBUF_RAW, (u16_t)(RESP_MAX_PKTLEN), PBUF_RAM);
+ 	if(NULL == p)
+ 		return;
+@@ -449,10 +454,6 @@ static void chap_respond(ppp_pcb *pcb, int id,
+ 		return;
+ 	}
+ 
+-	if ((pcb->chap_client.flags & (LOWERUP | AUTH_STARTED)) != (LOWERUP | AUTH_STARTED))
+-		return;		/* not ready */
+-	if (len < 2 || len < pkt[0] + 1)
+-		return;		/* too short */
+ 	clen = pkt[0];
+ 	nlen = len - (clen + 1);
+ 
+@@ -481,6 +482,8 @@ static void chap_respond(ppp_pcb *pcb, int id,
+ 
+ 	clen = *outp;
+ 	nlen = (int)strlen(pcb->chap_client.name);
++	if (nlen > MAXNAMELEN)
++		nlen = MAXNAMELEN;
+ 	memcpy(outp + clen + 1, pcb->chap_client.name, nlen);
+ 
+ 	outp = (u_char*)p->payload + PPP_HDRLEN;
+diff --git a/src/netif/ppp/eap.c b/src/netif/ppp/eap.c
+index ea684bf5..48fdc2bd 100644
+--- a/src/netif/ppp/eap.c
++++ b/src/netif/ppp/eap.c
+@@ -1768,7 +1768,7 @@ static void eap_response(ppp_pcb *pcb, u_char *inp, int id, int len) {
+ 	switch (typenum) {
+ 	case EAPT_IDENTITY:
+ 		if (pcb->eap.es_server.ea_state != eapIdentify) {
+-			ppp_dbglog(("EAP discarding unwanted Identify \"%.q\"", len,
++			ppp_dbglog(("EAP discarding unwanted Identify \"%.*q\"", len,
+ 			    inp));
+ 			break;
+ 		}
+diff --git a/src/netif/ppp/fsm.c b/src/netif/ppp/fsm.c
+index 90a227c8..4cc99cd7 100644
+--- a/src/netif/ppp/fsm.c
++++ b/src/netif/ppp/fsm.c
+@@ -751,7 +751,12 @@ static void fsm_sconfreq(fsm *f, int retransmit) {
+     PUTSHORT(cilen + HEADERLEN, outp);
+     if (cilen != 0) {
+ 	(*f->callbacks->addci)(f, outp, &cilen);
+-	LWIP_ASSERT("cilen == p->len - HEADERLEN - PPP_HDRLEN", cilen == p->len - HEADERLEN - PPP_HDRLEN);
++	LWIP_ASSERT("cilen <= p->len - HEADERLEN - PPP_HDRLEN", cilen <= p->len - HEADERLEN - PPP_HDRLEN);
++	if (cilen < (int)(p->len - HEADERLEN - PPP_HDRLEN)) {
++	    u_char *lenp = (u_char*)p->payload + PPP_HDRLEN + 2;
++	    PUTSHORT(cilen + HEADERLEN, lenp);
++	    pbuf_realloc(p, (u16_t)(cilen + HEADERLEN + PPP_HDRLEN));
++	}
+     }
+ 
+     ppp_write(pcb, p);
+diff --git a/src/netif/ppp/ipcp.c b/src/netif/ppp/ipcp.c
+index b033cde0..fe538b46 100644
+--- a/src/netif/ppp/ipcp.c
++++ b/src/netif/ppp/ipcp.c
+@@ -1098,8 +1098,8 @@ static int ipcp_nakci(fsm *f, u_char *p, int len, int treat_as_reject) {
+      */
+ #define NAKCIADDRS(opt, neg, code) \
+     if ((neg) && \
++	len >= CILEN_ADDRS && \
+ 	(cilen = p[1]) == CILEN_ADDRS && \
+-	len >= cilen && \
+ 	p[0] == opt) { \
+ 	len -= cilen; \
+ 	INCPTR(2, p); \
+@@ -1114,6 +1114,7 @@ static int ipcp_nakci(fsm *f, u_char *p, int len, int treat_as_reject) {
+ #if VJ_SUPPORT
+ #define NAKCIVJ(opt, neg, code) \
+     if (go->neg && \
++	len >= CILEN_COMPRESS && \
+ 	((cilen = p[1]) == CILEN_COMPRESS || cilen == CILEN_VJ) && \
+ 	len >= cilen && \
+ 	p[0] == opt) { \
+@@ -1127,8 +1128,8 @@ static int ipcp_nakci(fsm *f, u_char *p, int len, int treat_as_reject) {
+ 
+ #define NAKCIADDR(opt, neg, code) \
+     if (go->neg && \
++	len >= CILEN_ADDR && \
+ 	(cilen = p[1]) == CILEN_ADDR && \
+-	len >= cilen && \
+ 	p[0] == opt) { \
+ 	len -= cilen; \
+ 	INCPTR(2, p); \
+@@ -1141,8 +1142,8 @@ static int ipcp_nakci(fsm *f, u_char *p, int len, int treat_as_reject) {
+ #if LWIP_DNS
+ #define NAKCIDNS(opt, neg, code) \
+     if (go->neg && \
++	len >= CILEN_ADDR && \
+ 	((cilen = p[1]) == CILEN_ADDR) && \
+-	len >= cilen && \
+ 	p[0] == opt) { \
+ 	len -= cilen; \
+ 	INCPTR(2, p); \
+@@ -1357,8 +1358,8 @@ static int ipcp_rejci(fsm *f, u_char *p, int len) {
+      */
+ #define REJCIADDRS(opt, neg, val1, val2) \
+     if ((neg) && \
++	len >= CILEN_ADDRS && \
+ 	(cilen = p[1]) == CILEN_ADDRS && \
+-	len >= cilen && \
+ 	p[0] == opt) { \
+ 	u32_t l; \
+ 	len -= cilen; \
+@@ -1379,8 +1380,8 @@ static int ipcp_rejci(fsm *f, u_char *p, int len) {
+ #if VJ_SUPPORT
+ #define REJCIVJ(opt, neg, val, old, maxslot, cflag) \
+     if (go->neg && \
++	len >= (old? CILEN_COMPRESS : CILEN_VJ) && \
+ 	p[1] == (old? CILEN_COMPRESS : CILEN_VJ) && \
+-	len >= p[1] && \
+ 	p[0] == opt) { \
+ 	len -= p[1]; \
+ 	INCPTR(2, p); \
+@@ -1402,8 +1403,8 @@ static int ipcp_rejci(fsm *f, u_char *p, int len) {
+ 
+ #define REJCIADDR(opt, neg, val) \
+     if (go->neg && \
++	len >= CILEN_ADDR && \
+ 	(cilen = p[1]) == CILEN_ADDR && \
+-	len >= cilen && \
+ 	p[0] == opt) { \
+ 	u32_t l; \
+ 	len -= cilen; \
+@@ -1419,8 +1420,8 @@ static int ipcp_rejci(fsm *f, u_char *p, int len) {
+ #if LWIP_DNS
+ #define REJCIDNS(opt, neg, dnsaddr) \
+     if (go->neg && \
++	len >= CILEN_ADDR && \
+ 	((cilen = p[1]) == CILEN_ADDR) && \
+-	len >= cilen && \
+ 	p[0] == opt) { \
+ 	u32_t l; \
+ 	len -= cilen; \
+@@ -1783,10 +1784,12 @@ endswitch:
+ 	    ucp = inp;			/* reset pointer */
+ 	    wo->req_addr = 0;		/* don't ask again */
+ 	}
+-	PUTCHAR(CI_ADDR, ucp);
+-	PUTCHAR(CILEN_ADDR, ucp);
+-	tl = lwip_ntohl(wo->hisaddr);
+-	PUTLONG(tl, ucp);
++	if ((ucp - inp) + CILEN_ADDR <= *len) {
++	    PUTCHAR(CI_ADDR, ucp);
++	    PUTCHAR(CILEN_ADDR, ucp);
++	    tl = lwip_ntohl(wo->hisaddr);
++	    PUTLONG(tl, ucp);
++	}
+     }
+ 
+     *len = ucp - inp;			/* Compute output length */
+diff --git a/src/netif/ppp/ipv6cp.c b/src/netif/ppp/ipv6cp.c
+index 2035ef9b..d31480e6 100644
+--- a/src/netif/ppp/ipv6cp.c
++++ b/src/netif/ppp/ipv6cp.c
+@@ -702,8 +702,8 @@ static int ipv6cp_nakci(fsm *f, u_char *p, int len, int treat_as_reject) {
+ #ifdef IPV6CP_COMP
+ #define NAKCIVJ(opt, neg, code) \
+     if (go->neg && \
++	len >= CILEN_COMPRESS && \
+ 	((cilen = p[1]) == CILEN_COMPRESS) && \
+-	len >= cilen && \
+ 	p[0] == opt) { \
+ 	len -= cilen; \
+ 	INCPTR(2, p); \
+@@ -836,8 +836,8 @@ static int ipv6cp_rejci(fsm *f, u_char *p, int len) {
+ #ifdef IPV6CP_COMP
+ #define REJCIVJ(opt, neg, val) \
+     if (go->neg && \
++	len >= CILEN_COMPRESS && \
+ 	p[1] == CILEN_COMPRESS && \
+-	len >= p[1] && \
+ 	p[0] == opt) { \
+ 	len -= p[1]; \
+ 	INCPTR(2, p); \
+@@ -1050,9 +1050,11 @@ endswitch:
+ 	    ucp = inp;				/* reset pointer */
+ 	    wo->req_ifaceid = 0;		/* don't ask again */
+ 	}
+-	PUTCHAR(CI_IFACEID, ucp);
+-	PUTCHAR(CILEN_IFACEID, ucp);
+-	eui64_put(wo->hisid, ucp);
++	if ((ucp - inp) + CILEN_IFACEID <= *len) {
++	    PUTCHAR(CI_IFACEID, ucp);
++	    PUTCHAR(CILEN_IFACEID, ucp);
++	    eui64_put(wo->hisid, ucp);
++	}
+     }
+ 
+     *len = ucp - inp;			/* Compute output length */
+diff --git a/src/netif/ppp/lcp.c b/src/netif/ppp/lcp.c
+index 3bc0092b..32d49cac 100644
+--- a/src/netif/ppp/lcp.c
++++ b/src/netif/ppp/lcp.c
+@@ -531,7 +531,7 @@ static int lcp_extcode(fsm *f, int code, int id, u_char *inp, int len) {
+ 	break;
+     
+     case ECHOREQ:
+-	if (f->state != PPP_FSM_OPENED)
++	if (f->state != PPP_FSM_OPENED || len < CILEN_LONG)
+ 	    break;
+ 	magp = inp;
+ 	PUTLONG(go->magicnumber, magp);
 diff --git a/src/netif/ppp/pppoe.c b/src/netif/ppp/pppoe.c
 index 9e4f3468..14f9a7ba 100644
 --- a/src/netif/ppp/pppoe.c
@@ -823,6 +1226,24 @@ index 9e4f3468..14f9a7ba 100644
  
    /* Dispatch the packet thereby consuming it. */
    ppp_input(sc->pcb, pb);
+diff --git a/src/netif/ppp/utils.c b/src/netif/ppp/utils.c
+index d4e4759a..50185c83 100644
+--- a/src/netif/ppp/utils.c
++++ b/src/netif/ppp/utils.c
+@@ -288,10 +288,11 @@ int ppp_vslprintf(char *buf, int buflen, const char *fmt, va_list args) {
+ 		p = (const unsigned char *)"<NULL>";
+ 	    if (fillch == '0' && prec >= 0) {
+ 		n = prec;
++	    } else if (prec >= 0) {
++		const unsigned char *q = (const unsigned char *)memchr(p, '\0', (size_t)prec);
++		n = q ? (int)(q - p) : prec;
+ 	    } else {
+ 		n = (int)strlen((const char *)p);
+-		if (prec >= 0 && n > prec)
+-		    n = prec;
+ 	    }
+ 	    while (n > 0 && buflen > 0) {
+ 		c = *p++;
 diff --git a/src/netif/ppp/vj.c b/src/netif/ppp/vj.c
 index 7f0b206e..ff027e9d 100644
 --- a/src/netif/ppp/vj.c

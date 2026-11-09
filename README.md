@@ -17,9 +17,9 @@ make verify
 
 ## Contents
 
-- `LWIP_FORMAL_VERIFICATION_REPORT.md`: full report (theorems, defects, results).
-- `lwip_formal_verification_fixes.patch`: defensive fixes against the baseline commit.
-- `lwip_formal_verification_suite.c`: standalone 30-theorem suite.
-- `lwip_upstream_integration_test.c`: harness linked against the patched upstream sources.
+- `LWIP_FORMAL_VERIFICATION_REPORT.md`: full verification and audit report (40 theorems, 40 patched modules, results).
+- `lwip_formal_verification_fixes.patch`: unified defensive patch across 40 upstream files (+353 / -96).
+- `lwip_formal_verification_suite.c`: standalone 40-theorem formal verification suite across 8 phases.
+- `lwip_upstream_integration_test.c`: real upstream integration harness linking >60 lwIP modules.
 - `port/include/`: Linux build port (`lwipopts.h`, `arch/`).
 - `Reference/`: original Phase 1-4 suite.
